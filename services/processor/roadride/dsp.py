@@ -8,9 +8,11 @@ windows, the dose, the forward-axis estimate, an open pothole) lives in the JSON
 and tests feed the same signal whole and in random chunks.
 
 Inputs are the app's deviceMotion samples: user acceleration and gravity in g and the rotation rate
-in rad/s, in the phone's frame, at a nominal 100 Hz with jitter. They are resampled onto a uniform
-100 Hz grid (IIR filters assume a fixed rate); a time gap (between two batches or inside one) or a
-missing batch resets the filters and starts a new grid, so nothing is interpolated across a hole.
+in rad/s, in the phone's frame, at a nominal 100 Hz with jitter. CoreMotion's userAcceleration is the
+negative of the phone's acceleration (see UA_SIGN), so it is flipped once on the way in. The samples
+are resampled onto a uniform 100 Hz grid (IIR filters assume a fixed rate); a time gap (between two
+batches or inside one) or a missing batch resets the filters and starts a new grid, so nothing is
+interpolated across a hole.
 
 ISO 2631-1 Wf (motion sickness): H = Hh·Hl·Ht·Hs with f1=0.08, f2=0.63, f3=∞, f4=0.25, Q4=0.86,
 f5=0.0625, Q5=0.80, f6=0.1, Q6=0.80 Hz (parameters and transfer functions as reproduced in the Chalmers
@@ -38,6 +40,12 @@ import numpy as np
 from scipy import signal
 
 G = 9.80665  # m/s² per g
+# CoreMotion reports a phone lying screen up at rest as -1 g on z and a falling one as 0, and
+# userAcceleration = total - gravity: in free fall that is +1 g "up" while the phone falls. So the
+# phone's acceleration is -userAcceleration. Taken as is, the learned forward axis pointed backwards,
+# which flipped the pitch rate and hid every speed bump (and a_vert was positive downwards).
+UA_SIGN = -1.0
+LEGACY_UA_SIGN = 1.0  # trips whose saved state predates UA_SIGN
 
 FS = 100.0  # resampling grid, Hz
 DT = 1.0 / FS
@@ -164,6 +172,9 @@ class Pipeline:
     def __init__(self, state: dict | None = None):
         s = state or {}
         self.dose = float(s.get("dose", 0.0))  # ∫ a_w² dt over the whole trip, never reset
+        # A trip in progress during the deploy (saved with a dose, without ua_sign) keeps the old sign so
+        # its filters and forward axis carry on consistently; the finalize job redoes it with UA_SIGN.
+        self.ua_sign = float(s.get("ua_sign", LEGACY_UA_SIGN if "dose" in s else UA_SIGN))
         self.forward_sum = list(s.get("forward_sum", [0.0, 0.0, 0.0]))
         self.forward_n = int(s.get("forward_n", 0))
         self.prev_fix = s.get("prev_fix")  # [t, speed or None]
@@ -183,7 +194,8 @@ class Pipeline:
 
     def to_state(self) -> dict:
         return {
-            "dose": self.dose, "forward_sum": self.forward_sum, "forward_n": self.forward_n,
+            "dose": self.dose, "ua_sign": self.ua_sign,
+            "forward_sum": self.forward_sum, "forward_n": self.forward_n,
             "prev_fix": self.prev_fix, "h_acc": self.h_acc, "h_n": self.h_n,
             "last_event_t": self.last_event_t, "open_event": self.open_event,
             "rough_ema": self.rough_ema, "grid": self.grid,
@@ -241,7 +253,8 @@ class Pipeline:
         return g / n
 
     def _vert(self, ua_g: np.ndarray) -> np.ndarray:
-        """Upward acceleration, m/s²: user acceleration projected on minus the gravity direction."""
+        """Upward acceleration, m/s²: the phone's acceleration (userAcceleration · ua_sign) projected on
+        minus the gravity direction."""
         down = self._down(ua_g[:, 3:6])
         return -np.einsum("ij,ij->i", ua_g[:, 0:3], down) * G
 
@@ -270,8 +283,8 @@ class Pipeline:
     def feed(self, t: np.ndarray, ua: np.ndarray, grav: np.ndarray,
              fixes: list[tuple[float, float | None]], *, reset: bool = False,
              rr: np.ndarray | None = None) -> FeedResult:
-        """t: epoch seconds (n,), ua and grav: (n, 3) in g, rr: (n, 3) rad/s (None = no rotation, so no
-        speed bumps), all in the phone frame. fixes: (epoch s, speed m/s)."""
+        """t: epoch seconds (n,), ua (CoreMotion's userAcceleration) and grav: (n, 3) in g, rr: (n, 3)
+        rad/s (None = no rotation, so no speed bumps), all in the phone frame. fixes: (epoch s, speed m/s)."""
         out = FeedResult()
         fixes = sorted(set(self.pending_fixes) | {(float(ft), fv) for ft, fv in fixes},
                        key=lambda f: f[0])
@@ -279,7 +292,8 @@ class Pipeline:
         order = np.argsort(t, kind="stable")
         t = np.asarray(t, dtype=float)[order]
         rr = np.zeros((len(t), 3)) if rr is None else np.asarray(rr, float).reshape(-1, 3)
-        samples = np.hstack([np.asarray(ua, float).reshape(-1, 3), np.asarray(grav, float).reshape(-1, 3),
+        samples = np.hstack([np.asarray(ua, float).reshape(-1, 3) * self.ua_sign,
+                             np.asarray(grav, float).reshape(-1, 3),
                              rr])[order]
         if reset:
             self.grid = None

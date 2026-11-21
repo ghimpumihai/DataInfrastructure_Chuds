@@ -23,7 +23,8 @@ def _phone_frame():
 
 def synth(seconds, *, vert=lambda t: 0 * t, speed=lambda t: 0 * t + 12.0, lon=None, seed=1,
           jitter=True, rate=FS):
-    """deviceMotion-like samples (epoch s, ua g, gravity g) and 1 Hz fixes, for a vehicle signal."""
+    """deviceMotion-like samples (epoch s, ua g, gravity g) and 1 Hz fixes, for a vehicle signal.
+    ua has CoreMotion's sign: minus the phone's acceleration (dsp.UA_SIGN)."""
     rng = np.random.default_rng(seed)
     n = int(seconds * rate)
     t = np.arange(n) / rate
@@ -35,7 +36,7 @@ def synth(seconds, *, vert=lambda t: 0 * t, speed=lambda t: 0 * t + 12.0, lon=No
     a_vehicle[:, 2] = vert(t)
     if lon is not None:
         a_vehicle[:, 0] = lon(t)
-    ua = (a_vehicle @ r.T) / dsp.G
+    ua = dsp.UA_SIGN * (a_vehicle @ r.T) / dsp.G
     grav = np.tile(np.array([0, 0, -1.0]) @ r.T, (n, 1))
     fixes = [(T0 + s + 0.3, float(speed(np.array(s + 0.3)))) for s in range(int(seconds))]
     return T0 + t, ua, grav, fixes
@@ -83,9 +84,18 @@ def test_wf_peaks_near_017_hz_and_rejects_road_frequencies():
 
 def test_vertical_sign_screen_up():
     p = dsp.Pipeline()
-    ua = np.array([[0.0, 0.0, 0.1]])  # 0.1 g towards the screen side
     grav = np.array([[0.0, 0.0, -1.0]])  # screen up: gravity along -z
-    assert p._vert(np.hstack([ua, grav]))[0] == pytest.approx(0.1 * dsp.G)
+    # CoreMotion in free fall: the accelerometer reads 0, so userAcceleration = 0 - gravity = +1 g on z.
+    free_fall = np.array([[0.0, 0.0, 1.0]])
+    assert p._vert(np.hstack([free_fall * p.ua_sign, grav]))[0] == pytest.approx(-dsp.G)  # falling
+
+
+def test_a_trip_saved_before_the_sign_fix_keeps_its_sign():
+    assert dsp.Pipeline().ua_sign == dsp.UA_SIGN
+    old = dsp.Pipeline().to_state()
+    del old["ua_sign"]
+    assert dsp.Pipeline(old).ua_sign == dsp.LEGACY_UA_SIGN
+    assert dsp.Pipeline(dsp.Pipeline().to_state()).ua_sign == dsp.UA_SIGN
 
 
 def test_roughness_of_a_10hz_sine_is_its_rms():
@@ -191,6 +201,10 @@ def test_forward_axis_learned_from_speed_changes():
     fixes = [(T0 + s + 0.3, speed_from_lon(s + 0.3)) for s in range(240)]
     out, p = run_whole(t, ua, grav, fixes)
     assert p.forward_known
+    # The axis itself, not only a_lon: a backwards axis gives the same a_lon (both signs flip) but
+    # inverts the pitch rate, and then no speed bump is found.
+    fwd = np.array(p.forward_sum) / np.linalg.norm(p.forward_sum)
+    assert fwd @ (_phone_frame() @ np.array([1.0, 0.0, 0.0])) > 0.99
     late = [pt for pt in out.series if pt.t > T0 + 120]
     corr = np.corrcoef([pt.a_lon for pt in late], [lon(np.array(pt.t - T0)) for pt in late])[0, 1]
     assert corr > 0.9
@@ -292,7 +306,7 @@ def synth_bumps(seconds, bumps, *, speed=15 / 3.6 + 0.2, wheelbase=2.7, rate_amp
         pitch_up += _pulse(b, rate_amp)(rel) - _pulse(rear, rate_amp)(rel)
         vert += _pulse(b, vert_amp, 0.01)(rel) + _pulse(rear, vert_amp, 0.01)(rel)
     r = _phone_frame()
-    ua = ua + (np.column_stack([0 * rel, 0 * rel, vert]) @ r.T) / dsp.G
+    ua = ua + dsp.UA_SIGN * (np.column_stack([0 * rel, 0 * rel, vert]) @ r.T) / dsp.G
     # Nose up is a negative rotation about the vehicle's left (+y) axis.
     rr = np.column_stack([0 * rel, -pitch_up, 0 * rel]) @ r.T
     return t, ua, grav, fixes, rr
@@ -325,6 +339,33 @@ def test_speed_bump_detected_and_its_jolts_are_not_potholes():
     assert ev.type == "speed_bump" and abs(ev.t - (T0 + 5.0)) < 0.1
     assert ev.magnitude > dsp.POTHOLE_THRESHOLD_MS2 and 0 < ev.confidence <= 1
     assert ev.speed == pytest.approx(15 / 3.6 + 0.2)
+
+
+def test_speed_bumps_found_with_a_learned_forward_axis():
+    """As on a real trip: no preset axis. 3 min of speed changes teach it, then 4 bumps at 15 km/h.
+    With the raw CoreMotion sign the axis came out backwards and all 4 were reported as potholes."""
+    secs, learn_s, v = 230, 180, 15 / 3.6 + 0.2
+    lon = lambda t: np.where(t < learn_s, 4 * 2 * np.pi / 20 * np.cos(2 * np.pi * t / 20), 0.0)  # noqa: E731
+    speed = lambda t: np.where(t < learn_s, 8 + 4 * np.sin(2 * np.pi * t / 20), v)  # noqa: E731
+    t, ua, grav, fixes = synth(secs, lon=lon, speed=speed, seed=5)
+    rel = t - T0
+    bumps = [190.0, 200.0, 210.0, 220.0]
+    pitch_up, vert = np.zeros_like(rel), np.zeros_like(rel)
+    for b in bumps:
+        rear = b + 2.7 / v
+        pitch_up += _pulse(b, 0.4)(rel) - _pulse(rear, 0.4)(rel)
+        vert += _pulse(b, 15.0, 0.01)(rel) + _pulse(rear, 15.0, 0.01)(rel)
+    r = _phone_frame()
+    ua = ua + dsp.UA_SIGN * (np.column_stack([0 * rel, 0 * rel, vert]) @ r.T) / dsp.G
+    rr = np.column_stack([0 * rel, -pitch_up, 0 * rel]) @ r.T
+    p = dsp.Pipeline()
+    out = p.feed(t, ua, grav, fixes, rr=rr)
+    events = out.events + p.flush()
+    assert [round(e.t - T0) for e in events if e.type == "speed_bump"] == bumps
+    assert not [e for e in events if e.type == "pothole"]
+    # a_vert is positive upwards: the jolt of the front axle climbing the bump.
+    jolt = max((s for s in out.series if abs(s.t - T0 - bumps[0]) < 0.3), key=lambda s: abs(s.a_vert))
+    assert jolt.a_vert > dsp.POTHOLE_THRESHOLD_MS2
 
 
 @pytest.mark.parametrize("wheelbase", [2.2, 3.0, 6.0])

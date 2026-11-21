@@ -196,7 +196,7 @@ def _with_motion(b: dict, vert) -> dict:
     t0 = b["t0UtcMs"] / 1000
     zeros = [0.0] * 200
     b["deviceMotion"] = {"t": rel.tolist(), "ua_x": zeros, "ua_y": zeros,
-                         "ua_z": (vert(t0 + rel) / 9.80665).tolist(),
+                         "ua_z": (-vert(t0 + rel) / 9.80665).tolist(),  # CoreMotion's sign
                          "g_x": zeros, "g_y": zeros, "g_z": [-1.0] * 200,
                          "rr_x": zeros, "rr_y": zeros, "rr_z": zeros,
                          "q_w": [1.0] * 200, "q_x": zeros, "q_y": zeros, "q_z": zeros}

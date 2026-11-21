@@ -54,7 +54,7 @@ def motion_batch(template: dict, session_id: str, seq: int, t0_epoch: float, ver
     rel = np.arange(200) / 100.0
     up_g = vert(t0_epoch + rel) / 9.80665
     zeros = [0.0] * 200
-    dm = {"t": rel.tolist(), "ua_x": zeros, "ua_y": zeros, "ua_z": up_g.tolist(),
+    dm = {"t": rel.tolist(), "ua_x": zeros, "ua_y": zeros, "ua_z": (-up_g).tolist(),  # CoreMotion's sign
           "g_x": zeros, "g_y": zeros, "g_z": [-1.0] * 200,
           "rr_x": zeros, "rr_y": zeros, "rr_z": zeros,
           "q_w": [1.0] * 200, "q_x": zeros, "q_y": zeros, "q_z": zeros}

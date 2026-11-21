@@ -61,7 +61,7 @@ def make_folder(root, *, sid=SID, seconds=SECONDS, ended=True):
     rows = {k: [] for k in HEADERS}
     for i in range(n):
         rows["device_motion"].append(_row("device_motion", t[i], {
-            "ua_x": "0.000000", "ua_y": "0.000000", "ua_z": f"{vert[i] / 9.80665:.6f}",
+            "ua_x": "0.000000", "ua_y": "0.000000", "ua_z": f"{-vert[i] / 9.80665:.6f}",
             "g_x": "0.000000", "g_y": "0.000000", "g_z": "-1.000000",
             "rr_x": "0.000000", "rr_y": "0.000000", "rr_z": "" if i == 77 else "0.000000",
             "q_w": "1.000000", "q_x": "0.000000", "q_y": "0.000000", "q_z": "0.000000",

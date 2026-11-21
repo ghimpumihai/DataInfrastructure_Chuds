@@ -82,6 +82,7 @@ says so and shows each card's last data time, instead of reporting the phones as
 | `isMock` | `session.json` → `syntheticSensors` (mock sessions generated for the pipeline) |
 | `includeInAgg`, `exclusionReasons` | `sessions.include_in_agg` and the rule that set it |
 | `msdvZ`, `msiPct` | MSDV of the whole session (ISO 2631-1 Wf, vertical); `msiPct = msdvZ / 3` |
+| `sickness.ratings[].msdvSoFar`, `sickness.spearman` | MSDV of the last `session_series` point at or before each MISC rating (null before the first one); Spearman rank correlation of those with the ratings (average ranks for ties; null below 3 ratings) |
 | `quality.*` | per-stream rows/rates/gaps, GPS accuracy, invalid windows, `rejected/late/duplicate` live batches |
 | `detection` | detections vs. manual taps within ±1.5 s (precision, recall) |
 | `SessionSeries` | `session_series` (≈ 5 Hz vertical/lateral/longitudinal acceleration, speed, MSDV so far) |

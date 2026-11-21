@@ -212,7 +212,9 @@ def test_signal_results_are_served(client, seed, fixture_batch):
     def vert(t):
         return 0.8 * np.sin(2 * np.pi * 0.2 * t) + 15.0 * np.exp(-((t - pothole_at) / 0.01) ** 2)
 
-    batches = [_with_motion(b, vert) for b in _trip(fixture_batch, 30, start=start)]
+    misc = {i: [{"t": 1.0, "type": "sickness", "value": str(v), "note": None}]
+            for i, v in ((5, 1), (12, 2), (20, 2), (27, 5))}
+    batches = [_with_motion(b, vert) for b in _trip(fixture_batch, 30, start=start, labels_at=misc)]
     seed(meta=[session_meta(SID)], batches=batches)
 
     series = _ok(client, f"/api/sessions/{SID}/series")
@@ -223,6 +225,18 @@ def test_signal_results_are_served(client, seed, fixture_batch):
     s = _ok(client, f"/api/sessions/{SID}")
     assert s["msdvZ"] > 0 and s["msiPct"] == pytest.approx(s["msdvZ"] / 3, abs=1e-4)
     assert s["sickness"]["msdvZ"] == s["msdvZ"]
+    # Each rating carries the dose reached by then (the series point at or before it), so the
+    # prediction can be compared with what the passenger said (plan §9 step 6).
+    ratings = s["sickness"]["ratings"]
+    assert [r["value"] for r in ratings] == [1, 2, 2, 5]
+    for r in ratings:
+        t_ms = int(dt.datetime.fromisoformat(r["tUtc"].replace("Z", "+00:00")).timestamp() * 1000)
+        k = max(i for i, t in enumerate(series["t"]) if t <= t_ms)
+        assert r["msdvSoFar"] == pytest.approx(series["msdv"][k], abs=1e-4)
+    so_far = [r["msdvSoFar"] for r in ratings]
+    assert so_far == sorted(so_far) and so_far[0] > 0 and so_far[-1] <= s["msdvZ"]
+    # The dose only grows, so the ratings' ranks [0, 1.5, 1.5, 3] against [0, 1, 2, 3].
+    assert s["sickness"]["spearman"] == pytest.approx(4.5 / (4.5 * 5.0) ** 0.5, abs=1e-4)
     assert s["eventCounts"] == {"pothole": 1, "speed_bump": 0, "rail_joint": 0}
 
     (ev,) = _ok(client, f"/api/sessions/{SID}/events")["features"]

@@ -385,14 +385,54 @@ def rating_value(value) -> int | None:
 
 
 def _ratings(conn: Connection, session_id: str) -> list[dict]:
+    """Each MISC rating with the dose the passenger had had by then (plan §9 step 6): the last
+    session_series point at or before it, None before the first one."""
     out = []
-    for t, value in conn.execute(
-            "SELECT t, value FROM labels WHERE session_id = %s AND type = %s ORDER BY t",
+    for t, value, msdv in conn.execute(
+            """SELECT l.t, l.value, s.msdv FROM labels l
+               LEFT JOIN LATERAL (SELECT msdv FROM session_series
+                                  WHERE session_id = l.session_id AND t <= l.t
+                                  ORDER BY t DESC LIMIT 1) s ON true
+               WHERE l.session_id = %s AND l.type = %s ORDER BY l.t""",
             (session_id, SICKNESS_LABEL)).fetchall():
         number = rating_value(value)
         if number is not None:
-            out.append({"tUtc": iso(t), "value": number, "msdvSoFar": None})
+            out.append({"tUtc": iso(t), "value": number, "msdvSoFar": rnd(msdv, 5)})
     return out
+
+
+def spearman(xs: list[float], ys: list[float]) -> float | None:
+    """Rank correlation with average ranks for ties, the mock's rule (src/mock/dataset.ts)."""
+    if len(xs) < 3:
+        return None
+
+    def ranks(values: list[float]) -> list[float]:
+        order = sorted(range(len(values)), key=lambda k: values[k])
+        out = [0.0] * len(values)
+        i = 0
+        while i < len(order):
+            j = i
+            while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+                j += 1
+            for k in range(i, j + 1):
+                out[order[k]] = (i + j) / 2
+            i = j + 1
+        return out
+
+    rx, ry = ranks(xs), ranks(ys)
+    mx, my = sum(rx) / len(rx), sum(ry) / len(ry)
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    dx = sum((a - mx) ** 2 for a in rx)
+    dy = sum((b - my) ** 2 for b in ry)
+    return num / (dx * dy) ** 0.5 if dx > 0 and dy > 0 else None
+
+
+def _sickness(r: dict, ratings: list[dict]) -> dict:
+    paired = [x for x in ratings if x["msdvSoFar"] is not None]
+    rho = spearman([x["msdvSoFar"] for x in paired], [x["value"] for x in paired])
+    return {"msdvZ": rnd(r["msdv_z"], 4),
+            "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
+            "ratings": ratings, "spearman": rnd(rho, 4)}
 
 
 def _require_session(conn: Connection, session_id: str) -> None:
@@ -416,9 +456,7 @@ def session_detail(conn: Connection, session_id: str, cache: TripStatsCache | No
         **_summary(r),
         "quality": _quality(r, streams),
         "detection": _detection(r),
-        "sickness": {"msdvZ": rnd(r["msdv_z"], 4),
-                     "msiPct": None if r["msdv_z"] is None else round(r["msdv_z"] / 3, 4),
-                     "ratings": _ratings(conn, session_id), "spearman": None},
+        "sickness": _sickness(r, _ratings(conn, session_id)),
         "processedAt": iso(r["finalized_at"]),
         "processorVersion": None,
     }
